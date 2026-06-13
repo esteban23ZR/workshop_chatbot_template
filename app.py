@@ -42,6 +42,8 @@ MODEL_ALIASES = {
     "hypernoba": "hypernova-60b",
     "hypernova": "hypernova-60b",
     "hypernova-60b": "hypernova-60b",
+    "blackstar": "blackstar-10b",
+    "blackstar-10b": "blackstar-10b",
 }
 
 
@@ -388,7 +390,7 @@ def compactif_chat(
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     api_key = get_secret("COMPACTIF_API_KEY")
     base_url = get_secret("COMPACTIF_BASE_URL", model_cfg.get("base_url", "https://api.compactif.ai/v1"))
-    model = normalize_model(model_cfg.get("default_model", "glm-5-1"))
+    model = normalize_model(model_cfg.get("default_model", "hypernova-60b"))
     started = time.perf_counter()
 
     if not api_key:
@@ -467,7 +469,7 @@ def chat_with_tools(
         "total_tokens": 0,
         "usage_source": "api",
         "api_calls": 0,
-        "model": normalize_model(model_cfg.get("default_model", "glm-5-1")),
+        "model": normalize_model(model_cfg.get("default_model", "hypernova-60b")),
         "tools_sent": tool_names,
         "tools_called": [],
     }
@@ -715,7 +717,7 @@ def render_header(company: Dict[str, Any], logo_path: Optional[Path], chunk_coun
     st.divider()
 
 
-MODEL_CHOICES = ["glm-5-1", "hypernova-60b"]
+MODEL_CHOICES = ["hypernova-60b", "blackstar-10b", "glm-5-1"]
 
 
 def render_sidebar(
@@ -730,7 +732,7 @@ def render_sidebar(
         st.caption("Change the model and tools, ask the same question, and watch tokens and time change.")
 
         st.markdown('<div class="sidebar-section">Model</div>', unsafe_allow_html=True)
-        current_model = normalize_model(model_cfg.get("default_model", "glm-5-1"))
+        current_model = normalize_model(model_cfg.get("default_model", "hypernova-60b"))
         selected_model = st.selectbox(
             "Model",
             MODEL_CHOICES,
@@ -755,6 +757,15 @@ def render_sidebar(
         enabled = active_tool_names(runtime_tools_cfg)
 
         st.metric("Tools on", len(enabled))
+
+        st.markdown('<div class="sidebar-section">History</div>', unsafe_allow_html=True)
+        if "use_chat_history" not in st.session_state:
+            st.session_state.use_chat_history = True
+        st.session_state.use_chat_history = st.checkbox(
+            "Send chat history",
+            value=st.session_state.use_chat_history,
+            help="When OFF, only the latest question is sent to the model. Compare prompt tokens with history ON vs OFF.",
+        )
 
         st.divider()
         if st.button("↺ Reset chat", use_container_width=True):
@@ -810,6 +821,7 @@ def record_run(question: str, metrics: Dict[str, Any]):
         "Total tok": int(metrics.get("total_tokens", 0)),
         "Cost ($)": round(float(cost), 6) if cost is not None else None,
         "Tools called": ", ".join(tools_called) if tools_called else "—",
+        "History": "on" if metrics.get("use_chat_history") else "off",
     })
 
 
@@ -852,8 +864,9 @@ def render_comparison_lab(demo_mode: bool, model_cfg: Dict[str, Any]):
         render_pricing_reference(model_cfg)
         with st.expander("How to run a good experiment"):
             st.markdown(
+                "- **History cost:** turn chat history OFF and ask a follow-up question. Compare *Prompt tok* with history ON.\n"
                 "- **Tool cost:** ask one question with all tools OFF, then ON. Compare *Prompt tok* and *Cost ($)*.\n"
-                "- **Model cost:** ask the *same* question on `glm-5-1`, then `hypernova-60b`. Compare *Total tok*, *Time (s)*, and *Cost ($)*.\n"
+                "- **Model cost:** ask the *same* question on `hypernova-60b`, `blackstar-10b`, and `glm-5-1`. Compare *Total tok*, *Time (s)*, and *Cost ($)*.\n"
                 "- **Tool use:** ask a math question with the calculator ON vs OFF and watch *Tools called*.\n"
                 "- Keep the question identical so only one variable changes at a time."
             )
@@ -914,12 +927,75 @@ def render_comparison_lab(demo_mode: bool, model_cfg: Dict[str, Any]):
 
     with st.expander("How to run a good experiment"):
         st.markdown(
+            "- **History cost:** turn chat history OFF and ask a follow-up question. Compare *Prompt tok* with history ON.\n"
             "- **Tool cost:** ask one question with all tools OFF, then ON. Compare *Prompt tok* and *Cost ($)*.\n"
-            "- **Model cost:** ask the *same* question on `glm-5-1`, then `hypernova-60b`. Compare *Total tok*, *Time (s)*, and *Cost ($)*.\n"
+            "- **Model cost:** ask the *same* question on `hypernova-60b`, `blackstar-10b`, and `glm-5-1`. Compare *Total tok*, *Time (s)*, and *Cost ($)*.\n"
             "- **Tool use:** ask a math question with the calculator ON vs OFF and watch *Tools called*.\n"
             "- Keep the question identical so only one variable changes at a time."
         )
     render_pricing_reference(model_cfg)
+
+
+def process_user_message(
+    user_input: str,
+    company: Dict[str, Any],
+    personality: Dict[str, Any],
+    model_cfg: Dict[str, Any],
+    runtime_tools_cfg: Dict[str, Any],
+    chunks: List[Dict[str, str]],
+):
+    use_history = bool(st.session_state.get("use_chat_history", True))
+    st.session_state.messages.append({"role": "user", "content": user_input})
+
+    relevant = search_chunks(user_input, chunks, top_k=4)
+    knowledge_block = ""
+    if relevant:
+        knowledge_block = "\n\nRelevant company knowledge snippets:\n" + "\n\n".join(
+            f"Source: {r['source']}\n{r['text']}" for r in relevant
+        )
+
+    system_prompt = build_system_prompt(company, personality, model_cfg) + knowledge_block
+
+    api_messages: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}]
+    if use_history:
+        api_messages.extend([
+            {"role": msg["role"], "content": msg["content"]}
+            for msg in st.session_state.messages[-10:]
+        ])
+    else:
+        api_messages.append({"role": "user", "content": user_input})
+
+    tools = build_tools(runtime_tools_cfg)
+    tool_names = active_tool_names(runtime_tools_cfg)
+
+    with st.spinner("Thinking..."):
+        try:
+            answer, metrics = chat_with_tools(
+                api_messages,
+                model_cfg,
+                tools,
+                chunks,
+                company,
+                tool_names,
+            )
+            metrics = attach_request_cost(metrics, model_cfg)
+        except Exception as exc:
+            answer = f"There was an error calling the model: {exc}"
+            metrics = attach_request_cost({
+                "response_time_s": 0.0,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+                "usage_source": "unavailable",
+                "api_calls": 0,
+                "model": normalize_model(model_cfg.get("default_model", "hypernova-60b")),
+                "tools_sent": tool_names,
+                "tools_called": [],
+            }, model_cfg)
+
+    metrics["use_chat_history"] = use_history
+    st.session_state.messages.append({"role": "assistant", "content": answer, "metrics": metrics})
+    record_run(user_input, metrics)
 
 
 def render_chat_tab(
@@ -940,58 +1016,8 @@ def render_chat_tab(
     if not user_input:
         return
 
-    st.session_state.messages.append({"role": "user", "content": user_input})
-    with st.chat_message("user"):
-        st.markdown(user_input)
-
-    relevant = search_chunks(user_input, chunks, top_k=4)
-    knowledge_block = ""
-    if relevant:
-        knowledge_block = "\n\nRelevant company knowledge snippets:\n" + "\n\n".join(
-            f"Source: {r['source']}\n{r['text']}" for r in relevant
-        )
-
-    system_prompt = build_system_prompt(company, personality, model_cfg) + knowledge_block
-
-    api_messages: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}]
-    api_messages.extend([
-        {"role": msg["role"], "content": msg["content"]}
-        for msg in st.session_state.messages[-10:]
-    ])
-
-    tools = build_tools(runtime_tools_cfg)
-    tool_names = active_tool_names(runtime_tools_cfg)
-
-    with st.chat_message("assistant"):
-        with st.spinner("Thinking..."):
-            try:
-                answer, metrics = chat_with_tools(
-                    api_messages,
-                    model_cfg,
-                    tools,
-                    chunks,
-                    company,
-                    tool_names,
-                )
-                metrics = attach_request_cost(metrics, model_cfg)
-            except Exception as exc:
-                answer = f"There was an error calling the model: {exc}"
-                metrics = attach_request_cost({
-                    "response_time_s": 0.0,
-                    "prompt_tokens": 0,
-                    "completion_tokens": 0,
-                    "total_tokens": 0,
-                    "usage_source": "unavailable",
-                    "api_calls": 0,
-                    "model": normalize_model(model_cfg.get("default_model", "glm-5-1")),
-                    "tools_sent": tool_names,
-                    "tools_called": [],
-                }, model_cfg)
-            st.markdown(answer)
-            render_message_metrics(metrics)
-
-    st.session_state.messages.append({"role": "assistant", "content": answer, "metrics": metrics})
-    record_run(user_input, metrics)
+    process_user_message(user_input, company, personality, model_cfg, runtime_tools_cfg, chunks)
+    st.rerun()
 
 
 def main():
