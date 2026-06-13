@@ -1,7 +1,9 @@
 import ast
+import base64
 import copy
 import json
 import math
+import mimetypes
 import os
 import re
 import time
@@ -698,9 +700,27 @@ def inject_custom_css():
                 padding: 0.25rem 0 0 0 !important;
                 overflow: visible !important;
             }
+            .header-logo-img {
+                display: block;
+                max-height: 72px;
+                max-width: 120px;
+                width: auto;
+                height: auto;
+                object-fit: contain;
+                margin-left: auto;
+            }
         </style>
         """,
         unsafe_allow_html=True,
+    )
+
+
+def render_logo_html(logo_path: Path, max_height: int = 72) -> str:
+    mime = mimetypes.guess_type(str(logo_path))[0] or "image/png"
+    encoded = base64.b64encode(logo_path.read_bytes()).decode("ascii")
+    return (
+        f'<img class="header-logo-img" src="data:{mime};base64,{encoded}" '
+        f'alt="Company logo" style="max-height:{max_height}px;" />'
     )
 
 
@@ -717,19 +737,22 @@ def render_header(company: Dict[str, Any], logo_path: Optional[Path], chunk_coun
         knowledge_label = "No company data yet"
         knowledge_class = "meta-chip-warn"
 
-    if logo_path:
-        st.image(str(logo_path), width=48)
+    text_col, logo_col = st.columns([5, 1], vertical_alignment="center")
+    with text_col:
+        st.title(bot_name)
+        st.write(bot_goal)
+        st.markdown(
+            f"<div class='app-meta'>"
+            f"<span class='meta-chip meta-chip-company'>{company_name}</span>"
+            f"<span class='meta-chip {knowledge_class}'>{knowledge_label}</span>"
+            f"<span class='meta-chip {status_class}'>{status_label}</span>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+    with logo_col:
+        if logo_path:
+            st.markdown(render_logo_html(logo_path), unsafe_allow_html=True)
 
-    st.title(bot_name)
-    st.write(bot_goal)
-    st.markdown(
-        f"<div class='app-meta'>"
-        f"<span class='meta-chip meta-chip-company'>{company_name}</span>"
-        f"<span class='meta-chip {knowledge_class}'>{knowledge_label}</span>"
-        f"<span class='meta-chip {status_class}'>{status_label}</span>"
-        f"</div>",
-        unsafe_allow_html=True,
-    )
     st.divider()
 
 
